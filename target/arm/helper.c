@@ -12106,6 +12106,24 @@ static inline int fp_exception_el(CPUARMState *env)
         return 0;
     }
 
+    /* Without FPU, CPACR cannot be written and cp10 always null */
+    if (arm_feature(env, ARM_FEATURE_M)) {
+        int cp10 = extract32(env->v7m.cpacr, 20, 2);
+        int cp11 = extract32(env->v7m.cpacr, 22, 2);
+
+        if (cp10 != cp11)
+            return 1;
+        switch(cp10) {
+        case 0:
+        case 2:
+            return 1;
+        case 1:
+            return !cur_el;
+        case 3:
+            return 0;
+        }
+    }
+
     /* The CPACR controls traps to EL1, or PL1 if we're 32 bit:
      * 0, 2 : trap EL0 and EL1/PL1 accesses
      * 1    : trap only EL0 accesses
@@ -12202,7 +12220,8 @@ void cpu_get_tb_cpu_state(CPUARMState *env, target_ulong *pc,
             flags |= ARM_TBFLAG_NS_MASK;
         }
         if (env->vfp.xregs[ARM_VFP_FPEXC] & (1 << 30)
-            || arm_el_is_aa64(env, 1)) {
+            || arm_el_is_aa64(env, 1)
+            || arm_feature(env, ARM_FEATURE_M)) {
             flags |= ARM_TBFLAG_VFPEN_MASK;
         }
         flags |= (extract32(env->cp15.c15_cpar, 0, 2)

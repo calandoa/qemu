@@ -1,3 +1,24 @@
+Notes for https://github.com/calandoa/qemu:
++++++++++++++++++++++++++++++++++++++++++++
+
+This fork is intended to enhance the implementation of cortex-m4.
+
+- It adds a new cpu "cortex-m4f" which enable VFP4 feature
+- it implements CPACR register (required to enable the FPU)
+- it corrects an icount bug for systick/timers
+
+Compilation:
+./configure --target-list=arm-softmmu --extra-cflags=-mtune=native --disable-sdl --disable-gcrypt --disable-curl --audio-drv-list= --disable-vnc --disable-docs --disable-pie --disable-attr --disable-blobs --disable-kvm --disable-vhost-net --disable-libusb --disable-guest-agent --disable-gtk --disable-capstone --disable-libxml2 --disable-nettle --disable-vhost-crypto --disable-vhost-scsi --disable-vhost-vsock --disable-vhost-user --disable-qom-cast-debug --disable-replication --disable-tpm --disable-live-block-migration --disable-malloc-trim
+make
+
+Execution:
+qemu-system-arm -M lm3s6965evb -nographic -kernel myprog.bin -serial file:$(tty) -icount 6 -cpu cortex-m4f --no-reboot --monitor none
+
+
+Original README:
+++++++++++++++++
+
+
          QEMU README
          ===========
 
