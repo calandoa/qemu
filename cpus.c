@@ -544,6 +544,12 @@ void qemu_start_warp_timer(void)
         return;
     }
 
+    /* Workaround to fix systick & timers with icount */
+    CPUState *cpu;
+    CPU_FOREACH(cpu) {
+        atomic_mb_set(&cpu->exit_request, 1);
+    }
+
     if (!all_cpu_threads_idle()) {
         return;
     }

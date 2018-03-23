@@ -489,6 +489,7 @@ typedef struct CPUARMState {
         uint32_t mmfar[M_REG_NUM_BANKS]; /* MemManage Fault Address */
         uint32_t bfar; /* BusFault Address */
         uint32_t sfar; /* Secure Fault Address Register */
+        uint32_t cpacr; /* Coprocessor Access Control Register */
         unsigned mpu_ctrl[M_REG_NUM_BANKS]; /* MPU_CTRL */
         int exception;
         uint32_t primask[M_REG_NUM_BANKS];

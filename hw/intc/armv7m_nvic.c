@@ -1035,6 +1035,8 @@ static uint32_t nvic_readl(NVICState *s, uint32_t offset, MemTxAttrs attrs)
     }
     case 0xd84: /* CSSELR */
         return cpu->env.v7m.csselr[attrs.secure];
+    case 0xd88: /* Coprocessor Access Control.  */
+        return cpu->env.v7m.cpacr;
     /* TODO: Implement debug registers.  */
     case 0xd90: /* MPU_TYPE */
         /* Unified MPU; if the MPU is not present this value is zero */
@@ -1403,6 +1405,12 @@ static void nvic_writel(NVICState *s, uint32_t offset, uint32_t value,
     case 0xd84: /* CSSELR */
         if (!arm_v7m_csselr_razwi(cpu)) {
             cpu->env.v7m.csselr[attrs.secure] = value & R_V7M_CSSELR_INDEX_MASK;
+        }
+        break;
+    case 0xd88: /* Coprocessor Access Control.  */
+        if (arm_feature(&cpu->env, ARM_FEATURE_VFP4)) {
+            /* If copro not implemented, CPACR discard writes. */
+            cpu->env.v7m.cpacr = value;
         }
         break;
     case 0xd90: /* MPU_TYPE */
