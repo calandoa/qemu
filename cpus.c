@@ -544,12 +544,6 @@ void qemu_start_warp_timer(void)
         return;
     }
 
-    /* Workaround to fix systick & timers with icount */
-    CPUState *cpu;
-    CPU_FOREACH(cpu) {
-        atomic_mb_set(&cpu->exit_request, 1);
-    }
-
     if (!all_cpu_threads_idle()) {
         return;
     }
@@ -898,11 +892,19 @@ void qemu_timer_notify_cb(void *opaque, QEMUClockType type)
         return;
     }
 
-    if (!qemu_in_vcpu_thread() && first_cpu) {
+    if (qemu_in_vcpu_thread()) {
+        /* A CPU is currently running; kick it back out to the
+         * tcg_cpu_exec() loop so it will recalculate its
+         * icount deadline immediately.
+         */
+        qemu_cpu_kick(current_cpu);
+    } else if (first_cpu) {
         /* qemu_cpu_kick is not enough to kick a halted CPU out of
          * qemu_tcg_wait_io_event.  async_run_on_cpu, instead,
          * causes cpu_thread_is_idle to return false.  This way,
          * handle_icount_deadline can run.
+         * If we have no CPUs at all for some reason, we don't
+         * need to do anything.
          */
         async_run_on_cpu(first_cpu, do_nothing, RUN_ON_CPU_NULL);
     }
