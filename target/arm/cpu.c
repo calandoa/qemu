@@ -814,6 +814,9 @@ static void arm_cpu_realizefn(DeviceState *dev, Error **errp)
     if (arm_feature(env, ARM_FEATURE_ARM_DIV)) {
         set_feature(env, ARM_FEATURE_THUMB_DIV);
     }
+    if (arm_feature(env, ARM_FEATURE_VFP5)) {
+        set_feature(env, ARM_FEATURE_VFP4);
+    }
     if (arm_feature(env, ARM_FEATURE_VFP4)) {
         set_feature(env, ARM_FEATURE_VFP3);
         set_feature(env, ARM_FEATURE_VFP_FP16);
@@ -1268,6 +1271,13 @@ static void cortex_m4f_initfn(Object *obj)
     ARMCPU *cpu = ARM_CPU(obj);
     cortex_m4_initfn(obj);
     set_feature(&cpu->env, ARM_FEATURE_VFP4);
+}
+
+static void cortex_m7f_initfn(Object *obj)
+{
+    ARMCPU *cpu = ARM_CPU(obj);
+    cortex_m4_initfn(obj);
+    set_feature(&cpu->env, ARM_FEATURE_VFP5);
 }
 
 static void cortex_m33_initfn(Object *obj)
@@ -1808,6 +1818,8 @@ static const ARMCPUInfo arm_cpus[] = {
     { .name = "cortex-m4",   .initfn = cortex_m4_initfn,
                              .class_init = arm_v7m_class_init },
     { .name = "cortex-m4f",   .initfn = cortex_m4f_initfn,
+                             .class_init = arm_v7m_class_init },
+    { .name = "cortex-m7f",   .initfn = cortex_m7f_initfn,
                              .class_init = arm_v7m_class_init },
     { .name = "cortex-m33",  .initfn = cortex_m33_initfn,
                              .class_init = arm_v7m_class_init },

@@ -3264,7 +3264,8 @@ static int disas_vfp_v8_insn(DisasContext *s, uint32_t insn)
 {
     uint32_t rd, rn, rm, dp = extract32(insn, 8, 1);
 
-    if (!arm_dc_feature(s, ARM_FEATURE_V8)) {
+    if (!arm_dc_feature(s, ARM_FEATURE_V8) 
+        && !arm_dc_feature(s, ARM_FEATURE_VFP5)) {
         return 1;
     }
 
@@ -4737,7 +4738,7 @@ static inline TCGv_i32 neon_get_scalar(int size, int reg)
 static int gen_neon_unzip(int rd, int rm, int size, int q)
 {
     TCGv_ptr pd, pm;
-    
+
     if (!q && size == 2) {
         return 1;
     }
@@ -10835,11 +10836,9 @@ static void disas_thumb2_insn(DisasContext *s, uint32_t insn)
         break;
     case 6: case 7: case 14: case 15:
         /* Coprocessor.  */
-        if (arm_dc_feature(s, ARM_FEATURE_M)) {
-            /* We don't currently implement M profile FP support,
-             * so this entire space should give a NOCP fault, with
-             * the exception of the v8M VLLDM and VLSTM insns, which
-             * must be NOPs in Secure state and UNDEF in Nonsecure state.
+        if (!arm_dc_feature(s, ARM_FEATURE_VFP)) {
+            /* The v8M VLLDM and VLSTM insns can be implemented without FPU,
+             * but must be NOPs in Secure state and UNDEF in Nonsecure state.
              */
             if (arm_dc_feature(s, ARM_FEATURE_V8) &&
                 (insn & 0xffa00f00) == 0xec200a00) {
@@ -12577,6 +12576,9 @@ static void thumb_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
 
         insn = insn << 16 | insn2;
         dc->pc += 2;
+        //fprintf(stderr, "+32 %x %x  : %x\n", dcbase->pc_first, dcbase->pc_next, insn);
+    } else {
+        //fprintf(stderr, "+16 %x %x  : %x\n", dcbase->pc_first, dcbase->pc_next, insn);
     }
     dc->insn = insn;
 
