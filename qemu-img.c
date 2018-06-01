@@ -123,7 +123,6 @@ static void QEMU_NORETURN help(void)
            "  " arg_string "\n"
 #include "qemu-img-cmds.h"
 #undef DEF
-#undef GEN_DOCS
            "\n"
            "Command parameters:\n"
            "  'filename' is a disk image filename\n"
@@ -277,12 +276,12 @@ static BlockBackend *img_open_opts(const char *optstr,
     options = qemu_opts_to_qdict(opts, NULL);
     if (force_share) {
         if (qdict_haskey(options, BDRV_OPT_FORCE_SHARE)
-            && !qdict_get_bool(options, BDRV_OPT_FORCE_SHARE)) {
+            && strcmp(qdict_get_str(options, BDRV_OPT_FORCE_SHARE), "on")) {
             error_report("--force-share/-U conflicts with image options");
-            QDECREF(options);
+            qobject_unref(options);
             return NULL;
         }
-        qdict_put_bool(options, BDRV_OPT_FORCE_SHARE, true);
+        qdict_put_str(options, BDRV_OPT_FORCE_SHARE, "on");
     }
     blk = blk_new_open(NULL, NULL, options, flags, &local_err);
     if (!blk) {
@@ -561,9 +560,9 @@ static void dump_json_image_check(ImageCheck *check, bool quiet)
     str = qobject_to_json_pretty(obj);
     assert(str != NULL);
     qprintf(quiet, "%s\n", qstring_get_str(str));
-    qobject_decref(obj);
+    qobject_unref(obj);
     visit_free(v);
-    QDECREF(str);
+    qobject_unref(str);
 }
 
 static void dump_human_image_check(ImageCheck *check, bool quiet)
@@ -862,19 +861,23 @@ static void run_block_job(BlockJob *job, Error **errp)
     int ret = 0;
 
     aio_context_acquire(aio_context);
-    block_job_ref(job);
+    job_ref(&job->job);
     do {
+        float progress = 0.0f;
         aio_poll(aio_context, true);
-        qemu_progress_print(job->len ?
-                            ((float)job->offset / job->len * 100.f) : 0.0f, 0);
-    } while (!job->ready && !job->completed);
+        if (job->job.progress_total) {
+            progress = (float)job->job.progress_current /
+                       job->job.progress_total * 100.f;
+        }
+        qemu_progress_print(progress, 0);
+    } while (!job_is_ready(&job->job) && !job_is_completed(&job->job));
 
-    if (!job->completed) {
-        ret = block_job_complete_sync(job, errp);
+    if (!job_is_completed(&job->job)) {
+        ret = job_complete_sync(&job->job, errp);
     } else {
-        ret = job->ret;
+        ret = job->job.ret;
     }
-    block_job_unref(job);
+    job_unref(&job->job);
     aio_context_release(aio_context);
 
     /* publish completion progress only when success */
@@ -1015,7 +1018,7 @@ static int img_commit(int argc, char **argv)
 
     aio_context = bdrv_get_aio_context(bs);
     aio_context_acquire(aio_context);
-    commit_active_start("commit", bs, base_bs, BLOCK_JOB_DEFAULT, 0,
+    commit_active_start("commit", bs, base_bs, JOB_DEFAULT, 0,
                         BLOCKDEV_ON_ERROR_REPORT, NULL, common_block_job_cb,
                         &cbi, false, &local_err);
     aio_context_release(aio_context);
@@ -2384,9 +2387,9 @@ static void dump_json_image_info_list(ImageInfoList *list)
     str = qobject_to_json_pretty(obj);
     assert(str != NULL);
     printf("%s\n", qstring_get_str(str));
-    qobject_decref(obj);
+    qobject_unref(obj);
     visit_free(v);
-    QDECREF(str);
+    qobject_unref(str);
 }
 
 static void dump_json_image_info(ImageInfo *info)
@@ -2400,9 +2403,9 @@ static void dump_json_image_info(ImageInfo *info)
     str = qobject_to_json_pretty(obj);
     assert(str != NULL);
     printf("%s\n", qstring_get_str(str));
-    qobject_decref(obj);
+    qobject_unref(obj);
     visit_free(v);
-    QDECREF(str);
+    qobject_unref(str);
 }
 
 static void dump_human_image_info_list(ImageInfoList *list)
@@ -3381,7 +3384,7 @@ static int img_resize(int argc, char **argv)
     Error *err = NULL;
     int c, ret, relative;
     const char *filename, *fmt, *size;
-    int64_t n, total_size, current_size;
+    int64_t n, total_size, current_size, new_size;
     bool quiet = false;
     BlockBackend *blk = NULL;
     PreallocMode prealloc = PREALLOC_MODE_OFF;
@@ -3557,11 +3560,42 @@ static int img_resize(int argc, char **argv)
     }
 
     ret = blk_truncate(blk, total_size, prealloc, &err);
-    if (!ret) {
-        qprintf(quiet, "Image resized.\n");
-    } else {
+    if (ret < 0) {
         error_report_err(err);
+        goto out;
     }
+
+    new_size = blk_getlength(blk);
+    if (new_size < 0) {
+        error_report("Failed to verify truncated image length: %s",
+                     strerror(-new_size));
+        ret = -1;
+        goto out;
+    }
+
+    /* Some block drivers implement a truncation method, but only so
+     * the user can cause qemu to refresh the image's size from disk.
+     * The idea is that the user resizes the image outside of qemu and
+     * then invokes block_resize to inform qemu about it.
+     * (This includes iscsi and file-posix for device files.)
+     * Of course, that is not the behavior someone invoking
+     * qemu-img resize would find useful, so we catch that behavior
+     * here and tell the user. */
+    if (new_size != total_size && new_size == current_size) {
+        error_report("Image was not resized; resizing may not be supported "
+                     "for this image");
+        ret = -1;
+        goto out;
+    }
+
+    if (new_size != total_size) {
+        warn_report("Image should have been resized to %" PRIi64
+                    " bytes, but was resized to %" PRIi64 " bytes",
+                    total_size, new_size);
+    }
+
+    qprintf(quiet, "Image resized.\n");
+
 out:
     blk_unref(blk);
     if (ret) {
@@ -4457,9 +4491,9 @@ static void dump_json_block_measure_info(BlockMeasureInfo *info)
     str = qobject_to_json_pretty(obj);
     assert(str != NULL);
     printf("%s\n", qstring_get_str(str));
-    qobject_decref(obj);
+    qobject_unref(obj);
     visit_free(v);
-    QDECREF(str);
+    qobject_unref(str);
 }
 
 static int img_measure(int argc, char **argv)
@@ -4685,7 +4719,6 @@ static const img_cmd_t img_cmds[] = {
     { option, callback },
 #include "qemu-img-cmds.h"
 #undef DEF
-#undef GEN_DOCS
     { NULL, NULL, },
 };
 

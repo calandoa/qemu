@@ -18,7 +18,7 @@
 #include <sys/utsname.h>
 
 #include <linux/kvm.h>
-#include <linux/kvm_para.h>
+#include "standard-headers/asm-x86/kvm_para.h"
 
 #include "qemu-common.h"
 #include "cpu.h"
@@ -90,8 +90,10 @@ static bool has_msr_hv_runtime;
 static bool has_msr_hv_synic;
 static bool has_msr_hv_stimer;
 static bool has_msr_hv_frequencies;
+static bool has_msr_hv_reenlightenment;
 static bool has_msr_xss;
 static bool has_msr_spec_ctrl;
+static bool has_msr_virt_ssbd;
 static bool has_msr_smi_count;
 
 static uint32_t has_architectural_pmu_version;
@@ -385,7 +387,7 @@ uint32_t kvm_arch_get_supported_cpuid(KVMState *s, uint32_t function,
             ret &= ~(1U << KVM_FEATURE_PV_UNHALT);
         }
     } else if (function == KVM_CPUID_FEATURES && reg == R_EDX) {
-        ret |= KVM_HINTS_DEDICATED;
+        ret |= 1U << KVM_HINTS_DEDICATED;
         found = 1;
     }
 
@@ -583,7 +585,8 @@ static bool hyperv_enabled(X86CPU *cpu)
             cpu->hyperv_vpindex ||
             cpu->hyperv_runtime ||
             cpu->hyperv_synic ||
-            cpu->hyperv_stimer);
+            cpu->hyperv_stimer ||
+            cpu->hyperv_reenlightenment);
 }
 
 static int kvm_arch_set_tsc_khz(CPUState *cs)
@@ -632,11 +635,6 @@ static int hyperv_handle_properties(CPUState *cs)
     X86CPU *cpu = X86_CPU(cs);
     CPUX86State *env = &cpu->env;
 
-    if (cpu->hyperv_time &&
-            kvm_check_extension(cs->kvm_state, KVM_CAP_HYPERV_TIME) <= 0) {
-        cpu->hyperv_time = false;
-    }
-
     if (cpu->hyperv_relaxed_timing) {
         env->features[FEAT_HYPERV_EAX] |= HV_HYPERCALL_AVAILABLE;
     }
@@ -645,26 +643,71 @@ static int hyperv_handle_properties(CPUState *cs)
         env->features[FEAT_HYPERV_EAX] |= HV_APIC_ACCESS_AVAILABLE;
     }
     if (cpu->hyperv_time) {
+        if (kvm_check_extension(cs->kvm_state, KVM_CAP_HYPERV_TIME) <= 0) {
+            fprintf(stderr, "Hyper-V clocksources "
+                    "(requested by 'hv-time' cpu flag) "
+                    "are not supported by kernel\n");
+            return -ENOSYS;
+        }
         env->features[FEAT_HYPERV_EAX] |= HV_HYPERCALL_AVAILABLE;
         env->features[FEAT_HYPERV_EAX] |= HV_TIME_REF_COUNT_AVAILABLE;
         env->features[FEAT_HYPERV_EAX] |= HV_REFERENCE_TSC_AVAILABLE;
-
-        if (has_msr_hv_frequencies && tsc_is_stable_and_known(env)) {
-            env->features[FEAT_HYPERV_EAX] |= HV_ACCESS_FREQUENCY_MSRS;
-            env->features[FEAT_HYPERV_EDX] |= HV_FREQUENCY_MSRS_AVAILABLE;
-        }
     }
-    if (cpu->hyperv_crash && has_msr_hv_crash) {
+    if (cpu->hyperv_frequencies) {
+        if (!has_msr_hv_frequencies) {
+            fprintf(stderr, "Hyper-V frequency MSRs "
+                    "(requested by 'hv-frequencies' cpu flag) "
+                    "are not supported by kernel\n");
+            return -ENOSYS;
+        }
+        env->features[FEAT_HYPERV_EAX] |= HV_ACCESS_FREQUENCY_MSRS;
+        env->features[FEAT_HYPERV_EDX] |= HV_FREQUENCY_MSRS_AVAILABLE;
+    }
+    if (cpu->hyperv_crash) {
+        if (!has_msr_hv_crash) {
+            fprintf(stderr, "Hyper-V crash MSRs "
+                    "(requested by 'hv-crash' cpu flag) "
+                    "are not supported by kernel\n");
+            return -ENOSYS;
+        }
         env->features[FEAT_HYPERV_EDX] |= HV_GUEST_CRASH_MSR_AVAILABLE;
     }
+    if (cpu->hyperv_reenlightenment) {
+        if (!has_msr_hv_reenlightenment) {
+            fprintf(stderr,
+                    "Hyper-V Reenlightenment MSRs "
+                    "(requested by 'hv-reenlightenment' cpu flag) "
+                    "are not supported by kernel\n");
+            return -ENOSYS;
+        }
+        env->features[FEAT_HYPERV_EAX] |= HV_ACCESS_REENLIGHTENMENTS_CONTROL;
+    }
     env->features[FEAT_HYPERV_EDX] |= HV_CPU_DYNAMIC_PARTITIONING_AVAILABLE;
-    if (cpu->hyperv_reset && has_msr_hv_reset) {
+    if (cpu->hyperv_reset) {
+        if (!has_msr_hv_reset) {
+            fprintf(stderr, "Hyper-V reset MSR "
+                    "(requested by 'hv-reset' cpu flag) "
+                    "is not supported by kernel\n");
+            return -ENOSYS;
+        }
         env->features[FEAT_HYPERV_EAX] |= HV_RESET_AVAILABLE;
     }
-    if (cpu->hyperv_vpindex && has_msr_hv_vpindex) {
+    if (cpu->hyperv_vpindex) {
+        if (!has_msr_hv_vpindex) {
+            fprintf(stderr, "Hyper-V VP_INDEX MSR "
+                    "(requested by 'hv-vpindex' cpu flag) "
+                    "is not supported by kernel\n");
+            return -ENOSYS;
+        }
         env->features[FEAT_HYPERV_EAX] |= HV_VP_INDEX_AVAILABLE;
     }
-    if (cpu->hyperv_runtime && has_msr_hv_runtime) {
+    if (cpu->hyperv_runtime) {
+        if (!has_msr_hv_runtime) {
+            fprintf(stderr, "Hyper-V VP_RUNTIME MSR "
+                    "(requested by 'hv-runtime' cpu flag) "
+                    "is not supported by kernel\n");
+            return -ENOSYS;
+        }
         env->features[FEAT_HYPERV_EAX] |= HV_VP_RUNTIME_AVAILABLE;
     }
     if (cpu->hyperv_synic) {
@@ -1185,8 +1228,14 @@ static int kvm_get_supported_msrs(KVMState *s)
                 case HV_X64_MSR_TSC_FREQUENCY:
                     has_msr_hv_frequencies = true;
                     break;
+                case HV_X64_MSR_REENLIGHTENMENT_CONTROL:
+                    has_msr_hv_reenlightenment = true;
+                    break;
                 case MSR_IA32_SPEC_CTRL:
                     has_msr_spec_ctrl = true;
+                    break;
+                case MSR_VIRT_SSBD:
+                    has_msr_virt_ssbd = true;
                     break;
                 }
             }
@@ -1676,6 +1725,10 @@ static int kvm_put_msrs(X86CPU *cpu, int level)
     if (has_msr_spec_ctrl) {
         kvm_msr_entry_add(cpu, MSR_IA32_SPEC_CTRL, env->spec_ctrl);
     }
+    if (has_msr_virt_ssbd) {
+        kvm_msr_entry_add(cpu, MSR_VIRT_SSBD, env->virt_ssbd);
+    }
+
 #ifdef TARGET_X86_64
     if (lm_capable_kernel) {
         kvm_msr_entry_add(cpu, MSR_CSTAR, env->cstar);
@@ -1747,6 +1800,14 @@ static int kvm_put_msrs(X86CPU *cpu, int level)
             if (cpu->hyperv_time) {
                 kvm_msr_entry_add(cpu, HV_X64_MSR_REFERENCE_TSC,
                                   env->msr_hv_tsc);
+            }
+            if (cpu->hyperv_reenlightenment) {
+                kvm_msr_entry_add(cpu, HV_X64_MSR_REENLIGHTENMENT_CONTROL,
+                                  env->msr_hv_reenlightenment_control);
+                kvm_msr_entry_add(cpu, HV_X64_MSR_TSC_EMULATION_CONTROL,
+                                  env->msr_hv_tsc_emulation_control);
+                kvm_msr_entry_add(cpu, HV_X64_MSR_TSC_EMULATION_STATUS,
+                                  env->msr_hv_tsc_emulation_status);
             }
         }
         if (cpu->hyperv_vapic) {
@@ -2047,8 +2108,9 @@ static int kvm_get_msrs(X86CPU *cpu)
     if (has_msr_spec_ctrl) {
         kvm_msr_entry_add(cpu, MSR_IA32_SPEC_CTRL, 0);
     }
-
-
+    if (has_msr_virt_ssbd) {
+        kvm_msr_entry_add(cpu, MSR_VIRT_SSBD, 0);
+    }
     if (!env->tsc_valid) {
         kvm_msr_entry_add(cpu, MSR_IA32_TSC, 0);
         env->tsc_valid = !runstate_is_running();
@@ -2109,6 +2171,11 @@ static int kvm_get_msrs(X86CPU *cpu)
     }
     if (cpu->hyperv_time) {
         kvm_msr_entry_add(cpu, HV_X64_MSR_REFERENCE_TSC, 0);
+    }
+    if (cpu->hyperv_reenlightenment) {
+        kvm_msr_entry_add(cpu, HV_X64_MSR_REENLIGHTENMENT_CONTROL, 0);
+        kvm_msr_entry_add(cpu, HV_X64_MSR_TSC_EMULATION_CONTROL, 0);
+        kvm_msr_entry_add(cpu, HV_X64_MSR_TSC_EMULATION_STATUS, 0);
     }
     if (has_msr_hv_crash) {
         int j;
@@ -2367,6 +2434,15 @@ static int kvm_get_msrs(X86CPU *cpu)
             env->msr_hv_stimer_count[(index - HV_X64_MSR_STIMER0_COUNT)/2] =
                                 msrs[i].data;
             break;
+        case HV_X64_MSR_REENLIGHTENMENT_CONTROL:
+            env->msr_hv_reenlightenment_control = msrs[i].data;
+            break;
+        case HV_X64_MSR_TSC_EMULATION_CONTROL:
+            env->msr_hv_tsc_emulation_control = msrs[i].data;
+            break;
+        case HV_X64_MSR_TSC_EMULATION_STATUS:
+            env->msr_hv_tsc_emulation_status = msrs[i].data;
+            break;
         case MSR_MTRRdefType:
             env->mtrr_deftype = msrs[i].data;
             break;
@@ -2413,6 +2489,9 @@ static int kvm_get_msrs(X86CPU *cpu)
             break;
         case MSR_IA32_SPEC_CTRL:
             env->spec_ctrl = msrs[i].data;
+            break;
+        case MSR_VIRT_SSBD:
+            env->virt_ssbd = msrs[i].data;
             break;
         case MSR_IA32_RTIT_CTL:
             env->msr_rtit_ctrl = msrs[i].data;

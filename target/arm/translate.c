@@ -3824,38 +3824,56 @@ static int disas_vfp_insn(DisasContext *s, uint32_t insn)
                         gen_vfp_sqrt(dp);
                         break;
                     case 4: /* vcvtb.f32.f16, vcvtb.f64.f16 */
+                    {
+                        TCGv_ptr fpst = get_fpstatus_ptr(false);
+                        TCGv_i32 ahp_mode = get_ahp_flag();
                         tmp = gen_vfp_mrs();
                         tcg_gen_ext16u_i32(tmp, tmp);
                         if (dp) {
                             gen_helper_vfp_fcvt_f16_to_f64(cpu_F0d, tmp,
-                                                           cpu_env);
+                                                           fpst, ahp_mode);
                         } else {
                             gen_helper_vfp_fcvt_f16_to_f32(cpu_F0s, tmp,
-                                                           cpu_env);
+                                                           fpst, ahp_mode);
                         }
+                        tcg_temp_free_i32(ahp_mode);
+                        tcg_temp_free_ptr(fpst);
                         tcg_temp_free_i32(tmp);
                         break;
+                    }
                     case 5: /* vcvtt.f32.f16, vcvtt.f64.f16 */
+                    {
+                        TCGv_ptr fpst = get_fpstatus_ptr(false);
+                        TCGv_i32 ahp = get_ahp_flag();
                         tmp = gen_vfp_mrs();
                         tcg_gen_shri_i32(tmp, tmp, 16);
                         if (dp) {
                             gen_helper_vfp_fcvt_f16_to_f64(cpu_F0d, tmp,
-                                                           cpu_env);
+                                                           fpst, ahp);
                         } else {
                             gen_helper_vfp_fcvt_f16_to_f32(cpu_F0s, tmp,
-                                                           cpu_env);
+                                                           fpst, ahp);
                         }
                         tcg_temp_free_i32(tmp);
+                        tcg_temp_free_i32(ahp);
+                        tcg_temp_free_ptr(fpst);
                         break;
+                    }
                     case 6: /* vcvtb.f16.f32, vcvtb.f16.f64 */
+                    {
+                        TCGv_ptr fpst = get_fpstatus_ptr(false);
+                        TCGv_i32 ahp = get_ahp_flag();
                         tmp = tcg_temp_new_i32();
+
                         if (dp) {
                             gen_helper_vfp_fcvt_f64_to_f16(tmp, cpu_F0d,
-                                                           cpu_env);
+                                                           fpst, ahp);
                         } else {
                             gen_helper_vfp_fcvt_f32_to_f16(tmp, cpu_F0s,
-                                                           cpu_env);
+                                                           fpst, ahp);
                         }
+                        tcg_temp_free_i32(ahp);
+                        tcg_temp_free_ptr(fpst);
                         gen_mov_F0_vreg(0, rd);
                         tmp2 = gen_vfp_mrs();
                         tcg_gen_andi_i32(tmp2, tmp2, 0xffff0000);
@@ -3863,15 +3881,21 @@ static int disas_vfp_insn(DisasContext *s, uint32_t insn)
                         tcg_temp_free_i32(tmp2);
                         gen_vfp_msr(tmp);
                         break;
+                    }
                     case 7: /* vcvtt.f16.f32, vcvtt.f16.f64 */
+                    {
+                        TCGv_ptr fpst = get_fpstatus_ptr(false);
+                        TCGv_i32 ahp = get_ahp_flag();
                         tmp = tcg_temp_new_i32();
                         if (dp) {
                             gen_helper_vfp_fcvt_f64_to_f16(tmp, cpu_F0d,
-                                                           cpu_env);
+                                                           fpst, ahp);
                         } else {
                             gen_helper_vfp_fcvt_f32_to_f16(tmp, cpu_F0s,
-                                                           cpu_env);
+                                                           fpst, ahp);
                         }
+                        tcg_temp_free_i32(ahp);
+                        tcg_temp_free_ptr(fpst);
                         tcg_gen_shli_i32(tmp, tmp, 16);
                         gen_mov_F0_vreg(0, rd);
                         tmp2 = gen_vfp_mrs();
@@ -3880,6 +3904,7 @@ static int disas_vfp_insn(DisasContext *s, uint32_t insn)
                         tcg_temp_free_i32(tmp2);
                         gen_vfp_msr(tmp);
                         break;
+                    }
                     case 8: /* cmp */
                         gen_vfp_cmp(dp);
                         break;
@@ -4548,7 +4573,13 @@ static void gen_rfe(DisasContext *s, TCGv_i32 pc, TCGv_i32 cpsr)
      * appropriately depending on the new Thumb bit, so it must
      * be called after storing the new PC.
      */
+    if (tb_cflags(s->base.tb) & CF_USE_ICOUNT) {
+        gen_io_start();
+    }
     gen_helper_cpsr_write_eret(cpu_env, cpsr);
+    if (tb_cflags(s->base.tb) & CF_USE_ICOUNT) {
+        gen_io_end();
+    }
     tcg_temp_free_i32(cpsr);
     /* Must exit loop to check un-masked IRQs */
     s->base.is_jmp = DISAS_EXIT;
@@ -7216,53 +7247,70 @@ static int disas_neon_data_insn(DisasContext *s, uint32_t insn)
                     }
                     break;
                 case NEON_2RM_VCVT_F16_F32:
+                {
+                    TCGv_ptr fpst;
+                    TCGv_i32 ahp;
+
                     if (!arm_dc_feature(s, ARM_FEATURE_VFP_FP16) ||
                         q || (rm & 1)) {
                         return 1;
                     }
                     tmp = tcg_temp_new_i32();
                     tmp2 = tcg_temp_new_i32();
+                    fpst = get_fpstatus_ptr(true);
+                    ahp = get_ahp_flag();
                     tcg_gen_ld_f32(cpu_F0s, cpu_env, neon_reg_offset(rm, 0));
-                    gen_helper_neon_fcvt_f32_to_f16(tmp, cpu_F0s, cpu_env);
+                    gen_helper_vfp_fcvt_f32_to_f16(tmp, cpu_F0s, fpst, ahp);
                     tcg_gen_ld_f32(cpu_F0s, cpu_env, neon_reg_offset(rm, 1));
-                    gen_helper_neon_fcvt_f32_to_f16(tmp2, cpu_F0s, cpu_env);
+                    gen_helper_vfp_fcvt_f32_to_f16(tmp2, cpu_F0s, fpst, ahp);
                     tcg_gen_shli_i32(tmp2, tmp2, 16);
                     tcg_gen_or_i32(tmp2, tmp2, tmp);
                     tcg_gen_ld_f32(cpu_F0s, cpu_env, neon_reg_offset(rm, 2));
-                    gen_helper_neon_fcvt_f32_to_f16(tmp, cpu_F0s, cpu_env);
+                    gen_helper_vfp_fcvt_f32_to_f16(tmp, cpu_F0s, fpst, ahp);
                     tcg_gen_ld_f32(cpu_F0s, cpu_env, neon_reg_offset(rm, 3));
                     neon_store_reg(rd, 0, tmp2);
                     tmp2 = tcg_temp_new_i32();
-                    gen_helper_neon_fcvt_f32_to_f16(tmp2, cpu_F0s, cpu_env);
+                    gen_helper_vfp_fcvt_f32_to_f16(tmp2, cpu_F0s, fpst, ahp);
                     tcg_gen_shli_i32(tmp2, tmp2, 16);
                     tcg_gen_or_i32(tmp2, tmp2, tmp);
                     neon_store_reg(rd, 1, tmp2);
                     tcg_temp_free_i32(tmp);
+                    tcg_temp_free_i32(ahp);
+                    tcg_temp_free_ptr(fpst);
                     break;
+                }
                 case NEON_2RM_VCVT_F32_F16:
+                {
+                    TCGv_ptr fpst;
+                    TCGv_i32 ahp;
                     if (!arm_dc_feature(s, ARM_FEATURE_VFP_FP16) ||
                         q || (rd & 1)) {
                         return 1;
                     }
+                    fpst = get_fpstatus_ptr(true);
+                    ahp = get_ahp_flag();
                     tmp3 = tcg_temp_new_i32();
                     tmp = neon_load_reg(rm, 0);
                     tmp2 = neon_load_reg(rm, 1);
                     tcg_gen_ext16u_i32(tmp3, tmp);
-                    gen_helper_neon_fcvt_f16_to_f32(cpu_F0s, tmp3, cpu_env);
+                    gen_helper_vfp_fcvt_f16_to_f32(cpu_F0s, tmp3, fpst, ahp);
                     tcg_gen_st_f32(cpu_F0s, cpu_env, neon_reg_offset(rd, 0));
                     tcg_gen_shri_i32(tmp3, tmp, 16);
-                    gen_helper_neon_fcvt_f16_to_f32(cpu_F0s, tmp3, cpu_env);
+                    gen_helper_vfp_fcvt_f16_to_f32(cpu_F0s, tmp3, fpst, ahp);
                     tcg_gen_st_f32(cpu_F0s, cpu_env, neon_reg_offset(rd, 1));
                     tcg_temp_free_i32(tmp);
                     tcg_gen_ext16u_i32(tmp3, tmp2);
-                    gen_helper_neon_fcvt_f16_to_f32(cpu_F0s, tmp3, cpu_env);
+                    gen_helper_vfp_fcvt_f16_to_f32(cpu_F0s, tmp3, fpst, ahp);
                     tcg_gen_st_f32(cpu_F0s, cpu_env, neon_reg_offset(rd, 2));
                     tcg_gen_shri_i32(tmp3, tmp2, 16);
-                    gen_helper_neon_fcvt_f16_to_f32(cpu_F0s, tmp3, cpu_env);
+                    gen_helper_vfp_fcvt_f16_to_f32(cpu_F0s, tmp3, fpst, ahp);
                     tcg_gen_st_f32(cpu_F0s, cpu_env, neon_reg_offset(rd, 3));
                     tcg_temp_free_i32(tmp2);
                     tcg_temp_free_i32(tmp3);
+                    tcg_temp_free_i32(ahp);
+                    tcg_temp_free_ptr(fpst);
                     break;
+                }
                 case NEON_2RM_AESE: case NEON_2RM_AESMC:
                     if (!arm_dc_feature(s, ARM_FEATURE_V8_AES)
                         || ((rm | rd) & 1)) {
@@ -9237,11 +9285,14 @@ static void disas_arm_insn(DisasContext *s, unsigned int insn)
                             }
                         }
                         tcg_temp_free_i32(addr);
-                    } else {
+                    } else if ((insn & 0x00300f00) == 0) {
+                        /* 0bcccc_0001_0x00_xxxx_xxxx_0000_1001_xxxx
+                        *  - SWP, SWPB
+                        */
+
                         TCGv taddr;
                         TCGMemOp opc = s->be_data;
 
-                        /* SWP instruction */
                         rm = (insn) & 0xf;
 
                         if (insn & (1 << 22)) {
@@ -9259,6 +9310,8 @@ static void disas_arm_insn(DisasContext *s, unsigned int insn)
                                                 get_mem_index(s), opc);
                         tcg_temp_free(taddr);
                         store_reg(s, rd, tmp);
+                    } else {
+                        goto illegal_op;
                     }
                 }
             } else {
@@ -9838,7 +9891,13 @@ static void disas_arm_insn(DisasContext *s, unsigned int insn)
                 if (exc_return) {
                     /* Restore CPSR from SPSR.  */
                     tmp = load_cpu_field(spsr);
+                    if (tb_cflags(s->base.tb) & CF_USE_ICOUNT) {
+                        gen_io_start();
+                    }
                     gen_helper_cpsr_write_eret(cpu_env, tmp);
+                    if (tb_cflags(s->base.tb) & CF_USE_ICOUNT) {
+                        gen_io_end();
+                    }
                     tcg_temp_free_i32(tmp);
                     /* Must exit loop to check un-masked IRQs */
                     s->base.is_jmp = DISAS_EXIT;
@@ -9913,7 +9972,7 @@ static bool thumb_insn_is_16bit(DisasContext *s, uint32_t insn)
         return false;
     }
 
-    if ((insn >> 11) == 0x1e && (s->pc < s->next_page_start - 3)) {
+    if ((insn >> 11) == 0x1e && s->pc - s->page_start < TARGET_PAGE_SIZE - 3) {
         /* 0b1111_0xxx_xxxx_xxxx : BL/BLX prefix, and the suffix
          * is not on the next page; we merge this into a 32-bit
          * insn.
@@ -10778,8 +10837,23 @@ static void disas_thumb2_insn(DisasContext *s, uint32_t insn)
         /* Coprocessor.  */
         if (arm_dc_feature(s, ARM_FEATURE_M)) {
             /* We don't currently implement M profile FP support,
-             * so this entire space should give a NOCP fault.
+             * so this entire space should give a NOCP fault, with
+             * the exception of the v8M VLLDM and VLSTM insns, which
+             * must be NOPs in Secure state and UNDEF in Nonsecure state.
              */
+            if (arm_dc_feature(s, ARM_FEATURE_V8) &&
+                (insn & 0xffa00f00) == 0xec200a00) {
+                /* 0b1110_1100_0x1x_xxxx_xxxx_1010_xxxx_xxxx
+                 *  - VLLDM, VLSTM
+                 * We choose to UNDEF if the RAZ bits are non-zero.
+                 */
+                if (!s->v8m_secure || (insn & 0x0040f0ff)) {
+                    goto illegal_op;
+                }
+                /* Just NOP since FP support is not implemented */
+                break;
+            }
+            /* All other insns: NOCP */
             gen_exception_insn(s, 4, EXCP_NOCP, syn_uncategorized(),
                                default_exception_el(s));
             break;
@@ -12211,8 +12285,7 @@ static bool insn_crosses_page(CPUARMState *env, DisasContext *s)
     return !thumb_insn_is_16bit(s, insn);
 }
 
-static int arm_tr_init_disas_context(DisasContextBase *dcbase,
-                                     CPUState *cs, int max_insns)
+static void arm_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
 {
     DisasContext *dc = container_of(dcbase, DisasContext, base);
     CPUARMState *env = cs->env_ptr;
@@ -12269,19 +12342,18 @@ static int arm_tr_init_disas_context(DisasContextBase *dcbase,
     dc->is_ldex = false;
     dc->ss_same_el = false; /* Can't be true since EL_d must be AArch64 */
 
-    dc->next_page_start =
-        (dc->base.pc_first & TARGET_PAGE_MASK) + TARGET_PAGE_SIZE;
+    dc->page_start = dc->base.pc_first & TARGET_PAGE_MASK;
 
     /* If architectural single step active, limit to 1.  */
     if (is_singlestepping(dc)) {
-        max_insns = 1;
+        dc->base.max_insns = 1;
     }
 
     /* ARM is a fixed-length ISA.  Bound the number of insns to execute
        to those left on the page.  */
     if (!dc->thumb) {
-        int bound = (dc->next_page_start - dc->base.pc_first) / 4;
-        max_insns = MIN(max_insns, bound);
+        int bound = -(dc->base.pc_first | TARGET_PAGE_MASK) / 4;
+        dc->base.max_insns = MIN(dc->base.max_insns, bound);
     }
 
     cpu_F0s = tcg_temp_new_i32();
@@ -12292,8 +12364,6 @@ static int arm_tr_init_disas_context(DisasContextBase *dcbase,
     cpu_V1 = cpu_F1d;
     /* FIXME: cpu_M0 can probably be the same as cpu_V0.  */
     cpu_M0 = tcg_temp_new_i64();
-
-    return max_insns;
 }
 
 static void arm_tr_tb_start(DisasContextBase *dcbase, CPUState *cpu)
@@ -12552,8 +12622,8 @@ static void thumb_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
      * but isn't very efficient).
      */
     if (dc->base.is_jmp == DISAS_NEXT
-        && (dc->pc >= dc->next_page_start
-            || (dc->pc >= dc->next_page_start - 3
+        && (dc->pc - dc->page_start >= TARGET_PAGE_SIZE
+            || (dc->pc - dc->page_start >= TARGET_PAGE_SIZE - 3
                 && insn_crosses_page(env, dc)))) {
         dc->base.is_jmp = DISAS_TOO_MANY;
     }

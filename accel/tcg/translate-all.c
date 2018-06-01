@@ -299,9 +299,11 @@ static int encode_search(TranslationBlock *tb, uint8_t *block)
 
 /* The cpu state corresponding to 'searched_pc' is restored.
  * Called with tb_lock held.
+ * When reset_icount is true, current TB will be interrupted and
+ * icount should be recalculated.
  */
 static int cpu_restore_state_from_tb(CPUState *cpu, TranslationBlock *tb,
-                                     uintptr_t searched_pc)
+                                     uintptr_t searched_pc, bool reset_icount)
 {
     target_ulong data[TARGET_INSN_START_WORDS] = { tb->pc };
     uintptr_t host_pc = (uintptr_t)tb->tc.ptr;
@@ -333,14 +335,12 @@ static int cpu_restore_state_from_tb(CPUState *cpu, TranslationBlock *tb,
     return -1;
 
  found:
-    if (tb->cflags & CF_USE_ICOUNT) {
+    if (reset_icount && (tb->cflags & CF_USE_ICOUNT)) {
         assert(use_icount);
-        /* Reset the cycle counter to the start of the block.  */
-        cpu->icount_decr.u16.low += num_insns;
-        /* Clear the IO flag.  */
-        cpu->can_do_io = 0;
+        /* Reset the cycle counter to the start of the block
+           and shift if to the number of actually executed instructions */
+        cpu->icount_decr.u16.low += num_insns - i;
     }
-    cpu->icount_decr.u16.low -= i;
     restore_state_to_opc(env, tb, data);
 
 #ifdef CONFIG_PROFILER
@@ -351,7 +351,7 @@ static int cpu_restore_state_from_tb(CPUState *cpu, TranslationBlock *tb,
     return 0;
 }
 
-bool cpu_restore_state(CPUState *cpu, uintptr_t host_pc)
+bool cpu_restore_state(CPUState *cpu, uintptr_t host_pc, bool will_exit)
 {
     TranslationBlock *tb;
     bool r = false;
@@ -377,7 +377,7 @@ bool cpu_restore_state(CPUState *cpu, uintptr_t host_pc)
         tb_lock();
         tb = tb_find_pc(host_pc);
         if (tb) {
-            cpu_restore_state_from_tb(cpu, tb, host_pc);
+            cpu_restore_state_from_tb(cpu, tb, host_pc, will_exit);
             if (tb->cflags & CF_NOCACHE) {
                 /* one-shot translation, invalidate it immediately */
                 tb_phys_invalidate(tb, -1);
@@ -644,11 +644,8 @@ static inline void *alloc_code_gen_buffer(void)
 static inline void *alloc_code_gen_buffer(void)
 {
     size_t size = tcg_ctx->code_gen_buffer_size;
-    void *buf;
-
-    buf = VirtualAlloc(NULL, size, MEM_RESERVE | MEM_COMMIT,
+    return VirtualAlloc(NULL, size, MEM_RESERVE | MEM_COMMIT,
                         PAGE_EXECUTE_READWRITE);
-    return buf;
 }
 #else
 static inline void *alloc_code_gen_buffer(void)
@@ -1511,7 +1508,8 @@ void tb_invalidate_phys_page_range(tb_page_addr_t start, tb_page_addr_t end,
                 restore the CPU state */
 
                 current_tb_modified = 1;
-                cpu_restore_state_from_tb(cpu, current_tb, cpu->mem_io_pc);
+                cpu_restore_state_from_tb(cpu, current_tb,
+                                          cpu->mem_io_pc, true);
                 cpu_get_tb_cpu_state(env, &current_pc, &current_cs_base,
                                      &current_flags);
             }
@@ -1634,7 +1632,7 @@ static bool tb_invalidate_phys_page(tb_page_addr_t addr, uintptr_t pc)
                    restore the CPU state */
 
             current_tb_modified = 1;
-            cpu_restore_state_from_tb(cpu, current_tb, pc);
+            cpu_restore_state_from_tb(cpu, current_tb, pc, true);
             cpu_get_tb_cpu_state(env, &current_pc, &current_cs_base,
                                  &current_flags);
         }
@@ -1671,14 +1669,14 @@ static TranslationBlock *tb_find_pc(uintptr_t tc_ptr)
 }
 
 #if !defined(CONFIG_USER_ONLY)
-void tb_invalidate_phys_addr(AddressSpace *as, hwaddr addr)
+void tb_invalidate_phys_addr(AddressSpace *as, hwaddr addr, MemTxAttrs attrs)
 {
     ram_addr_t ram_addr;
     MemoryRegion *mr;
     hwaddr l = 1;
 
     rcu_read_lock();
-    mr = address_space_translate(as, addr, &addr, &l, false);
+    mr = address_space_translate(as, addr, &addr, &l, false, attrs);
     if (!(memory_region_is_ram(mr)
           || memory_region_is_romd(mr))) {
         rcu_read_unlock();
@@ -1700,7 +1698,7 @@ void tb_check_watchpoint(CPUState *cpu)
     tb = tb_find_pc(cpu->mem_io_pc);
     if (tb) {
         /* We can use retranslation to find the PC.  */
-        cpu_restore_state_from_tb(cpu, tb, cpu->mem_io_pc);
+        cpu_restore_state_from_tb(cpu, tb, cpu->mem_io_pc, true);
         tb_phys_invalidate(tb, -1);
     } else {
         /* The exception probably happened in a helper.  The CPU state should
@@ -1736,7 +1734,7 @@ void cpu_io_recompile(CPUState *cpu, uintptr_t retaddr)
         cpu_abort(cpu, "cpu_io_recompile: could not find TB for pc=%p",
                   (void *)retaddr);
     }
-    cpu_restore_state_from_tb(cpu, tb, retaddr);
+    cpu_restore_state_from_tb(cpu, tb, retaddr, true);
 
     /* On MIPS and SH, delay slot instructions can only be restarted if
        they were already the first instruction in the TB.  If this is not

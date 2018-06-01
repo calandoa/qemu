@@ -342,6 +342,10 @@ static int vhost_verify_ring_mappings(struct vhost_dev *dev,
         "used ring"
     };
 
+    if (vhost_dev_has_iommu(dev)) {
+        return 0;
+    }
+
     for (i = 0; i < dev->nvqs; ++i) {
         struct vhost_virtqueue *vq = dev->vqs + i;
 
@@ -595,10 +599,15 @@ static void vhost_region_add_section(struct vhost_dev *dev,
                                         prev_sec->offset_within_address_space,
                                         prev_sec->offset_within_region);
             } else {
-                error_report("%s: Overlapping but not coherent sections "
-                             "at %"PRIx64,
-                             __func__, mrs_gpa);
-                return;
+                /* adjoining regions are fine, but overlapping ones with
+                 * different blocks/offsets shouldn't happen
+                 */
+                if (mrs_gpa != prev_gpa_end + 1) {
+                    error_report("%s: Overlapping but not coherent sections "
+                                 "at %"PRIx64,
+                                 __func__, mrs_gpa);
+                    return;
+                }
             }
         }
     }
@@ -885,12 +894,16 @@ int vhost_device_iotlb_miss(struct vhost_dev *dev, uint64_t iova, int write)
 
     rcu_read_lock();
 
+    trace_vhost_iotlb_miss(dev, 1);
+
     iotlb = address_space_get_iotlb_entry(dev->vdev->dma_as,
-                                          iova, write);
+                                          iova, write,
+                                          MEMTXATTRS_UNSPECIFIED);
     if (iotlb.target_as != NULL) {
         ret = vhost_memory_region_lookup(dev, iotlb.translated_addr,
                                          &uaddr, &len);
         if (ret) {
+            trace_vhost_iotlb_miss(dev, 3);
             error_report("Fail to lookup the translated address "
                          "%"PRIx64, iotlb.translated_addr);
             goto out;
@@ -902,10 +915,14 @@ int vhost_device_iotlb_miss(struct vhost_dev *dev, uint64_t iova, int write)
         ret = vhost_backend_update_device_iotlb(dev, iova, uaddr,
                                                 len, iotlb.perm);
         if (ret) {
+            trace_vhost_iotlb_miss(dev, 4);
             error_report("Fail to update device iotlb");
             goto out;
         }
     }
+
+    trace_vhost_iotlb_miss(dev, 2);
+
 out:
     rcu_read_unlock();
 
@@ -1223,7 +1240,7 @@ int vhost_dev_init(struct vhost_dev *hdev, void *opaque,
         if (!(hdev->features & (0x1ULL << VHOST_F_LOG_ALL))) {
             error_setg(&hdev->migration_blocker,
                        "Migration disabled: vhost lacks VHOST_F_LOG_ALL feature.");
-        } else if (vhost_dev_log_is_shared(hdev) && !qemu_memfd_check()) {
+        } else if (vhost_dev_log_is_shared(hdev) && !qemu_memfd_alloc_check()) {
             error_setg(&hdev->migration_blocker,
                        "Migration disabled: failed to allocate shared memory");
         }
@@ -1451,7 +1468,6 @@ int vhost_dev_set_config(struct vhost_dev *hdev, const uint8_t *data,
 void vhost_dev_set_config_notifier(struct vhost_dev *hdev,
                                    const VhostDevConfigOps *ops)
 {
-    assert(hdev->vhost_ops);
     hdev->config_ops = ops;
 }
 

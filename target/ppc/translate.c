@@ -6561,7 +6561,7 @@ GEN_HANDLER(dcbtst, 0x1F, 0x16, 0x07, 0x00000001, PPC_CACHE),
 GEN_HANDLER_E(dcbtls, 0x1F, 0x06, 0x05, 0x02000001, PPC_BOOKE, PPC2_BOOKE206),
 GEN_HANDLER(dcbz, 0x1F, 0x16, 0x1F, 0x03C00001, PPC_CACHE_DCBZ),
 GEN_HANDLER(dst, 0x1F, 0x16, 0x0A, 0x01800001, PPC_ALTIVEC),
-GEN_HANDLER(dstst, 0x1F, 0x16, 0x0B, 0x02000001, PPC_ALTIVEC),
+GEN_HANDLER(dstst, 0x1F, 0x16, 0x0B, 0x01800001, PPC_ALTIVEC),
 GEN_HANDLER(dss, 0x1F, 0x16, 0x19, 0x019FF801, PPC_ALTIVEC),
 GEN_HANDLER(icbi, 0x1F, 0x16, 0x1E, 0x03E00001, PPC_CACHE_ICBI),
 GEN_HANDLER(dcba, 0x1F, 0x16, 0x17, 0x03E00001, PPC_CACHE_DCBA),
@@ -6991,7 +6991,7 @@ GEN_HANDLER2_E(trechkpt, "trechkpt", 0x1F, 0x0E, 0x1F, 0x03FFF800, \
 };
 
 #include "helper_regs.h"
-#include "translate_init.c"
+#include "translate_init.inc.c"
 
 /*****************************************************************************/
 /* Misc PowerPC helpers */
@@ -7048,14 +7048,20 @@ void ppc_cpu_dump_state(CPUState *cs, FILE *f, fprintf_function cpu_fprintf,
     }
     cpu_fprintf(f, " ]             RES " TARGET_FMT_lx "\n",
                 env->reserve_addr);
-    for (i = 0; i < 32; i++) {
-        if ((i & (RFPL - 1)) == 0)
-            cpu_fprintf(f, "FPR%02d", i);
-        cpu_fprintf(f, " %016" PRIx64, *((uint64_t *)&env->fpr[i]));
-        if ((i & (RFPL - 1)) == (RFPL - 1))
-            cpu_fprintf(f, "\n");
+
+    if (flags & CPU_DUMP_FPU) {
+        for (i = 0; i < 32; i++) {
+            if ((i & (RFPL - 1)) == 0) {
+                cpu_fprintf(f, "FPR%02d", i);
+            }
+            cpu_fprintf(f, " %016" PRIx64, *((uint64_t *)&env->fpr[i]));
+            if ((i & (RFPL - 1)) == (RFPL - 1)) {
+                cpu_fprintf(f, "\n");
+            }
+        }
+        cpu_fprintf(f, "FPSCR " TARGET_FMT_lx "\n", env->fpscr);
     }
-    cpu_fprintf(f, "FPSCR " TARGET_FMT_lx "\n", env->fpscr);
+
 #if !defined(CONFIG_USER_ONLY)
     cpu_fprintf(f, " SRR0 " TARGET_FMT_lx "  SRR1 " TARGET_FMT_lx
                    "    PVR " TARGET_FMT_lx " VRSAVE " TARGET_FMT_lx "\n",
@@ -7121,20 +7127,23 @@ void ppc_cpu_dump_state(CPUState *cs, FILE *f, fprintf_function cpu_fprintf,
     if (env->spr_cb[SPR_LPCR].name)
         cpu_fprintf(f, " LPCR " TARGET_FMT_lx "\n", env->spr[SPR_LPCR]);
 
-    switch (POWERPC_MMU_VER(env->mmu_model)) {
+    switch (env->mmu_model) {
     case POWERPC_MMU_32B:
     case POWERPC_MMU_601:
     case POWERPC_MMU_SOFT_6xx:
     case POWERPC_MMU_SOFT_74xx:
 #if defined(TARGET_PPC64)
-    case POWERPC_MMU_VER_64B:
-    case POWERPC_MMU_VER_2_03:
-    case POWERPC_MMU_VER_2_06:
-    case POWERPC_MMU_VER_2_07:
-    case POWERPC_MMU_VER_3_00:
+    case POWERPC_MMU_64B:
+    case POWERPC_MMU_2_03:
+    case POWERPC_MMU_2_06:
+    case POWERPC_MMU_2_07:
+    case POWERPC_MMU_3_00:
 #endif
         if (env->spr_cb[SPR_SDR1].name) { /* SDR1 Exists */
             cpu_fprintf(f, " SDR1 " TARGET_FMT_lx " ", env->spr[SPR_SDR1]);
+        }
+        if (env->spr_cb[SPR_PTCR].name) { /* PTCR Exists */
+            cpu_fprintf(f, " PTCR " TARGET_FMT_lx " ", env->spr[SPR_PTCR]);
         }
         cpu_fprintf(f, "  DAR " TARGET_FMT_lx "  DSISR " TARGET_FMT_lx "\n",
                     env->spr[SPR_DAR], env->spr[SPR_DSISR]);
@@ -7212,8 +7221,7 @@ void ppc_cpu_dump_statistics(CPUState *cs, FILE*f,
 #endif
 }
 
-static int ppc_tr_init_disas_context(DisasContextBase *dcbase,
-                                     CPUState *cs, int max_insns)
+static void ppc_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
 {
     DisasContext *ctx = container_of(dcbase, DisasContext, base);
     CPUPPCState *env = cs->env_ptr;
@@ -7237,10 +7245,9 @@ static int ppc_tr_init_disas_context(DisasContextBase *dcbase,
     ctx->sf_mode = msr_is_64bit(env, env->msr);
     ctx->has_cfar = !!(env->flags & POWERPC_FLAG_CFAR);
 #endif
-    if (env->mmu_model == POWERPC_MMU_32B ||
-        env->mmu_model == POWERPC_MMU_601 ||
-        (env->mmu_model & POWERPC_MMU_64B))
-            ctx->lazy_tlb_flush = true;
+    ctx->lazy_tlb_flush = env->mmu_model == POWERPC_MMU_32B
+        || env->mmu_model == POWERPC_MMU_601
+        || (env->mmu_model & POWERPC_MMU_64B);
 
     ctx->fpu_enabled = !!msr_fp;
     if ((env->flags & POWERPC_FLAG_SPE) && msr_spe)
@@ -7279,7 +7286,7 @@ static int ppc_tr_init_disas_context(DisasContextBase *dcbase,
 #endif
 
     bound = -(ctx->base.pc_first | TARGET_PAGE_MASK) / 4;
-    return MIN(max_insns, bound);
+    ctx->base.max_insns = MIN(ctx->base.max_insns, bound);
 }
 
 static void ppc_tr_tb_start(DisasContextBase *db, CPUState *cs)

@@ -768,6 +768,7 @@ static void read_cache_sizes(BlockDriverState *bs, QemuOpts *opts,
     BDRVQcow2State *s = bs->opaque;
     uint64_t combined_cache_size;
     bool l2_cache_size_set, refcount_cache_size_set, combined_cache_size_set;
+    int min_refcount_cache = MIN_REFCOUNT_CACHE_SIZE * s->cluster_size;
 
     combined_cache_size_set = qemu_opt_get(opts, QCOW2_OPT_CACHE_SIZE);
     l2_cache_size_set = qemu_opt_get(opts, QCOW2_OPT_L2_CACHE_SIZE);
@@ -802,23 +803,28 @@ static void read_cache_sizes(BlockDriverState *bs, QemuOpts *opts,
         } else if (refcount_cache_size_set) {
             *l2_cache_size = combined_cache_size - *refcount_cache_size;
         } else {
-            *refcount_cache_size = combined_cache_size
-                                 / (DEFAULT_L2_REFCOUNT_SIZE_RATIO + 1);
-            *l2_cache_size = combined_cache_size - *refcount_cache_size;
+            uint64_t virtual_disk_size = bs->total_sectors * BDRV_SECTOR_SIZE;
+            uint64_t max_l2_cache = virtual_disk_size / (s->cluster_size / 8);
+
+            /* Assign as much memory as possible to the L2 cache, and
+             * use the remainder for the refcount cache */
+            if (combined_cache_size >= max_l2_cache + min_refcount_cache) {
+                *l2_cache_size = max_l2_cache;
+                *refcount_cache_size = combined_cache_size - *l2_cache_size;
+            } else {
+                *refcount_cache_size =
+                    MIN(combined_cache_size, min_refcount_cache);
+                *l2_cache_size = combined_cache_size - *refcount_cache_size;
+            }
         }
     } else {
-        if (!l2_cache_size_set && !refcount_cache_size_set) {
+        if (!l2_cache_size_set) {
             *l2_cache_size = MAX(DEFAULT_L2_CACHE_BYTE_SIZE,
                                  (uint64_t)DEFAULT_L2_CACHE_CLUSTERS
                                  * s->cluster_size);
-            *refcount_cache_size = *l2_cache_size
-                                 / DEFAULT_L2_REFCOUNT_SIZE_RATIO;
-        } else if (!l2_cache_size_set) {
-            *l2_cache_size = *refcount_cache_size
-                           * DEFAULT_L2_REFCOUNT_SIZE_RATIO;
-        } else if (!refcount_cache_size_set) {
-            *refcount_cache_size = *l2_cache_size
-                                 / DEFAULT_L2_REFCOUNT_SIZE_RATIO;
+        }
+        if (!refcount_cache_size_set) {
+            *refcount_cache_size = min_refcount_cache;
         }
     }
 
@@ -1063,7 +1069,7 @@ static int qcow2_update_options_prepare(BlockDriverState *bs,
 
     ret = 0;
 fail:
-    QDECREF(encryptopts);
+    qobject_unref(encryptopts);
     qemu_opts_del(opts);
     opts = NULL;
     return ret;
@@ -1142,6 +1148,7 @@ static int coroutine_fn qcow2_do_open(BlockDriverState *bs, QDict *options,
     uint64_t ext_end;
     uint64_t l1_vm_state_index;
     bool update_header = false;
+    bool header_updated = false;
 
     ret = bdrv_pread(bs->file, 0, &header, sizeof(header));
     if (ret < 0) {
@@ -1480,10 +1487,9 @@ static int coroutine_fn qcow2_do_open(BlockDriverState *bs, QDict *options,
         s->autoclear_features &= QCOW2_AUTOCLEAR_MASK;
     }
 
-    if (bdrv_dirty_bitmap_next(bs, NULL)) {
-        /* It's some kind of reopen with already existing dirty bitmaps. There
-         * are no known cases where we need loading bitmaps in such situation,
-         * so it's safer don't load them.
+    if (s->dirty_bitmaps_loaded) {
+        /* It's some kind of reopen. There are no known cases where we need to
+         * reload bitmaps in such a situation, so it's safer to skip them.
          *
          * Moreover, if we have some readonly bitmaps and we are reopening for
          * rw we should reopen bitmaps correspondingly.
@@ -1491,13 +1497,13 @@ static int coroutine_fn qcow2_do_open(BlockDriverState *bs, QDict *options,
         if (bdrv_has_readonly_bitmaps(bs) &&
             !bdrv_is_read_only(bs) && !(bdrv_get_flags(bs) & BDRV_O_INACTIVE))
         {
-            bool header_updated = false;
             qcow2_reopen_bitmaps_rw_hint(bs, &header_updated, &local_err);
-            update_header = update_header && !header_updated;
         }
-    } else if (qcow2_load_dirty_bitmaps(bs, &local_err)) {
-        update_header = false;
+    } else {
+        header_updated = qcow2_load_dirty_bitmaps(bs, &local_err);
+        s->dirty_bitmaps_loaded = true;
     }
+    update_header = update_header && !header_updated;
     if (local_err != NULL) {
         error_propagate(errp, local_err);
         ret = -EINVAL;
@@ -2183,7 +2189,7 @@ static void coroutine_fn qcow2_co_invalidate_cache(BlockDriverState *bs,
     qemu_co_mutex_lock(&s->lock);
     ret = qcow2_do_open(bs, options, flags, &local_err);
     qemu_co_mutex_unlock(&s->lock);
-    QDECREF(options);
+    qobject_unref(options);
     if (local_err) {
         error_propagate(errp, local_err);
         error_prepend(errp, "Could not reopen qcow2 layer: ");
@@ -3139,7 +3145,7 @@ static int coroutine_fn qcow2_co_create_opts(const char *filename, QemuOpts *opt
 
     /* Now get the QAPI type BlockdevCreateOptions */
     qobj = qdict_crumple(qdict, errp);
-    QDECREF(qdict);
+    qobject_unref(qdict);
     qdict = qobject_to(QDict, qobj);
     if (qdict == NULL) {
         ret = -EINVAL;
@@ -3168,7 +3174,7 @@ static int coroutine_fn qcow2_co_create_opts(const char *filename, QemuOpts *opt
 
     ret = 0;
 finish:
-    QDECREF(qdict);
+    qobject_unref(qdict);
     bdrv_unref(bs);
     qapi_free_BlockdevCreateOptions(create_options);
     return ret;

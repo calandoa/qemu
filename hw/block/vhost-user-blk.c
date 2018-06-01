@@ -196,7 +196,6 @@ static uint64_t vhost_user_blk_get_features(VirtIODevice *vdev,
                                             Error **errp)
 {
     VHostUserBlk *s = VHOST_USER_BLK(vdev);
-    uint64_t get_features;
 
     /* Turn on pre-defined features */
     virtio_add_feature(&features, VIRTIO_BLK_F_SEG_MAX);
@@ -215,9 +214,7 @@ static uint64_t vhost_user_blk_get_features(VirtIODevice *vdev,
         virtio_add_feature(&features, VIRTIO_BLK_F_MQ);
     }
 
-    get_features = vhost_get_features(&s->dev, user_feature_bits, features);
-
-    return get_features;
+    return vhost_get_features(&s->dev, user_feature_bits, features);
 }
 
 static void vhost_user_blk_handle_output(VirtIODevice *vdev, VirtQueue *vq)
@@ -259,6 +256,8 @@ static void vhost_user_blk_device_realize(DeviceState *dev, Error **errp)
     s->dev.vq_index = 0;
     s->dev.backend_features = 0;
 
+    vhost_dev_set_config_notifier(&s->dev, &blk_ops);
+
     ret = vhost_dev_init(&s->dev, &s->chardev, VHOST_BACKEND_TYPE_USER, 0);
     if (ret < 0) {
         error_setg(errp, "vhost-user-blk: vhost initialization failed: %s",
@@ -276,8 +275,6 @@ static void vhost_user_blk_device_realize(DeviceState *dev, Error **errp)
     if (s->blkcfg.num_queues != s->num_queues) {
         s->blkcfg.num_queues = s->num_queues;
     }
-
-    vhost_dev_set_config_notifier(&s->dev, &blk_ops);
 
     return;
 

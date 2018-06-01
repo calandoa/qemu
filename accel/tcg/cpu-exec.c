@@ -156,11 +156,14 @@ static inline tcg_target_ulong cpu_tb_exec(CPUState *cpu, TranslationBlock *itb)
     if (qemu_loglevel_mask(CPU_LOG_TB_CPU)
         && qemu_log_in_addr_range(itb->pc)) {
         qemu_log_lock();
+        int flags = 0;
+        if (qemu_loglevel_mask(CPU_LOG_TB_FPU)) {
+            flags |= CPU_DUMP_FPU;
+        }
 #if defined(TARGET_I386)
-        log_cpu_state(cpu, CPU_DUMP_CCOP);
-#else
-        log_cpu_state(cpu, 0);
+        flags |= CPU_DUMP_CCOP;
 #endif
+        log_cpu_state(cpu, flags);
         qemu_log_unlock();
     }
 #endif /* DEBUG_DISAS */
@@ -704,7 +707,6 @@ int cpu_exec(CPUState *cpu)
         g_assert(cpu == current_cpu);
         g_assert(cc == CPU_GET_CLASS(cpu));
 #endif /* buggy compiler */
-        cpu->can_do_io = 1;
         tb_lock_reset();
         if (qemu_mutex_iothread_locked()) {
             qemu_mutex_unlock_iothread();

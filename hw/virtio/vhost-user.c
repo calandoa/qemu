@@ -46,6 +46,7 @@ enum VhostUserProtocolFeature {
     VHOST_USER_PROTOCOL_F_CROSS_ENDIAN = 6,
     VHOST_USER_PROTOCOL_F_CRYPTO_SESSION = 7,
     VHOST_USER_PROTOCOL_F_PAGEFAULT = 8,
+    VHOST_USER_PROTOCOL_F_CONFIG = 9,
     VHOST_USER_PROTOCOL_F_MAX
 };
 
@@ -851,12 +852,42 @@ static void slave_read(void *opaque)
     VhostUserHeader hdr = { 0, };
     VhostUserPayload payload = { 0, };
     int size, ret = 0;
+    struct iovec iov;
+    struct msghdr msgh;
+    int fd = -1;
+    char control[CMSG_SPACE(sizeof(fd))];
+    struct cmsghdr *cmsg;
+    size_t fdsize;
+
+    memset(&msgh, 0, sizeof(msgh));
+    msgh.msg_iov = &iov;
+    msgh.msg_iovlen = 1;
+    msgh.msg_control = control;
+    msgh.msg_controllen = sizeof(control);
 
     /* Read header */
-    size = read(u->slave_fd, &hdr, VHOST_USER_HDR_SIZE);
+    iov.iov_base = &hdr;
+    iov.iov_len = VHOST_USER_HDR_SIZE;
+
+    size = recvmsg(u->slave_fd, &msgh, 0);
     if (size != VHOST_USER_HDR_SIZE) {
         error_report("Failed to read from slave.");
         goto err;
+    }
+
+    if (msgh.msg_flags & MSG_CTRUNC) {
+        error_report("Truncated message.");
+        goto err;
+    }
+
+    for (cmsg = CMSG_FIRSTHDR(&msgh); cmsg != NULL;
+         cmsg = CMSG_NXTHDR(&msgh, cmsg)) {
+            if (cmsg->cmsg_level == SOL_SOCKET &&
+                cmsg->cmsg_type == SCM_RIGHTS) {
+                    fdsize = cmsg->cmsg_len - CMSG_LEN(0);
+                    memcpy(&fd, CMSG_DATA(cmsg), fdsize);
+                    break;
+            }
     }
 
     if (hdr.size > VHOST_USER_PAYLOAD_SIZE) {
@@ -882,8 +913,14 @@ static void slave_read(void *opaque)
         break;
     default:
         error_report("Received unexpected msg type.");
+        if (fd != -1) {
+            close(fd);
+        }
         ret = -EINVAL;
     }
+
+    /* Message handlers need to make sure that fd will be consumed. */
+    fd = -1;
 
     /*
      * REPLY_ACK feature handling. Other reply types has to be managed
@@ -917,6 +954,9 @@ err:
     qemu_set_fd_handler(u->slave_fd, NULL, NULL, NULL);
     close(u->slave_fd);
     u->slave_fd = -1;
+    if (fd != -1) {
+        close(fd);
+    }
     return;
 }
 
@@ -1075,7 +1115,7 @@ static int vhost_user_postcopy_advise(struct vhost_dev *dev, Error **errp)
         error_setg(errp, "%s: Failed to get ufd", __func__);
         return -1;
     }
-    fcntl(ufd, F_SETFL, O_NONBLOCK);
+    qemu_set_nonblock(ufd);
 
     /* register ufd with userfault thread */
     u->postcopy_fd.fd = ufd;
@@ -1211,6 +1251,17 @@ static int vhost_user_init(struct vhost_dev *dev, void *opaque)
 
         dev->protocol_features =
             protocol_features & VHOST_USER_PROTOCOL_FEATURE_MASK;
+
+        if (!dev->config_ops || !dev->config_ops->vhost_dev_config_notifier) {
+            /* Don't acknowledge CONFIG feature if device doesn't support it */
+            dev->protocol_features &= ~(1ULL << VHOST_USER_PROTOCOL_F_CONFIG);
+        } else if (!(protocol_features &
+                    (1ULL << VHOST_USER_PROTOCOL_F_CONFIG))) {
+            error_report("Device expects VHOST_USER_PROTOCOL_F_CONFIG "
+                    "but backend does not support it.");
+            return -1;
+        }
+
         err = vhost_user_set_protocol_features(dev, dev->protocol_features);
         if (err < 0) {
             return err;
@@ -1304,7 +1355,7 @@ static bool vhost_user_requires_shm_log(struct vhost_dev *dev)
 
 static int vhost_user_migration_done(struct vhost_dev *dev, char* mac_addr)
 {
-    VhostUserMsg msg = { 0 };
+    VhostUserMsg msg = { };
 
     assert(dev->vhost_ops->backend_type == VHOST_BACKEND_TYPE_USER);
 
@@ -1405,6 +1456,11 @@ static int vhost_user_get_config(struct vhost_dev *dev, uint8_t *config,
         .hdr.size = VHOST_USER_CONFIG_HDR_SIZE + config_len,
     };
 
+    if (!virtio_has_feature(dev->protocol_features,
+                VHOST_USER_PROTOCOL_F_CONFIG)) {
+        return -1;
+    }
+
     if (config_len > VHOST_USER_MAX_CONFIG_SIZE) {
         return -1;
     }
@@ -1447,6 +1503,11 @@ static int vhost_user_set_config(struct vhost_dev *dev, const uint8_t *data,
         .hdr.flags = VHOST_USER_VERSION,
         .hdr.size = VHOST_USER_CONFIG_HDR_SIZE + size,
     };
+
+    if (!virtio_has_feature(dev->protocol_features,
+                VHOST_USER_PROTOCOL_F_CONFIG)) {
+        return -1;
+    }
 
     if (reply_supported) {
         msg.hdr.flags |= VHOST_USER_NEED_REPLY_MASK;
