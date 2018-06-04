@@ -967,7 +967,7 @@ static void stellaris_adc_fifo_write(stellaris_adc_state *s, int n,
 {
     int head;
 
-    /* TODO: Real hardware has limited size FIFOs.  We have a full 16 entry 
+    /* TODO: Real hardware has limited size FIFOs.  We have a full 16 entry
        FIFO fir each sequencer.  */
     head = (s->fifo[n].state >> 4) & 0xf;
     if (s->fifo[n].state & STELLARIS_ADC_FIFO_FULL) {
@@ -1223,6 +1223,16 @@ static stellaris_board_info stellaris_boards[] = {
     0x0f0f87ff,
     0x5000007f,
     BP_OLED_SSI | BP_GAMEPAD
+  },
+  { "SIMETRICVB",
+    0x10010002,
+    0x1073402e,
+    0x01ff01ff, /* dc0 */
+    0x001133ff,
+    0x030f5317,
+    0x0f0f87ff,
+    0x5000007f,
+    BP_OLED_SSI
   }
 };
 
@@ -1443,6 +1453,11 @@ static void lm3s6965evb_init(MachineState *machine)
     stellaris_init(machine, &stellaris_boards[1]);
 }
 
+static void simetricvb_init(MachineState *machine)
+{
+    stellaris_init(machine, &stellaris_boards[2]);
+}
+
 static void lm3s811evb_class_init(ObjectClass *oc, void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
@@ -1475,10 +1490,27 @@ static const TypeInfo lm3s6965evb_type = {
     .class_init = lm3s6965evb_class_init,
 };
 
+static void simetricvb_class_init(ObjectClass *oc, void *data)
+{
+    MachineClass *mc = MACHINE_CLASS(oc);
+
+    mc->desc = "Simetric Virtual Board";
+    mc->init = simetricvb_init;
+    mc->ignore_memory_transaction_failures = true;
+    mc->default_cpu_type = ARM_CPU_TYPE_NAME("cortex-m7f");
+}
+
+static const TypeInfo simetricvb_type = {
+    .name = MACHINE_TYPE_NAME("simetricvb"),
+    .parent = TYPE_MACHINE,
+    .class_init = simetricvb_class_init,
+};
+
 static void stellaris_machine_init(void)
 {
     type_register_static(&lm3s811evb_type);
     type_register_static(&lm3s6965evb_type);
+    type_register_static(&simetricvb_type);
 }
 
 type_init(stellaris_machine_init)
