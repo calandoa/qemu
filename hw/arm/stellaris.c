@@ -1227,7 +1227,7 @@ static stellaris_board_info stellaris_boards[] = {
   { "SIMETRICVB",
     0x10010002,
     0x1073402e,
-    0x01ff01ff, /* dc0 */
+    0x07ff01ff, /* dc0 */
     0x001133ff,
     0x030f5317,
     0x0f0f87ff,
